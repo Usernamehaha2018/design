@@ -4,17 +4,20 @@ class Mutex:
 
     @MCThread
     def t1(self):
-        self.lock1.acquire()
         while True:
-            pass
-        # lock2.release()
-        # lock1.acquire()
+            self.lock1.acquire()
+            self.lock2.acquire()
+            self.lock2.release()
+            self.lock1.release()
 
     @MCThread
     def t2(self):
-        self.lock2.acquire()
         while True:
-            pass
+            self.lock2.acquire()
+            self.lock1.acquire()
+            self.lock1.release()
+            self.lock2.release()
+
 
 
     # @marker

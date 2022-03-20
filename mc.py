@@ -1,8 +1,7 @@
 import inspect, ast, astor, copy, sys
+import threading
 from pathlib import Path
 from enum import Enum
-import threading
-
 from graphviz import Digraph
 
 
@@ -11,8 +10,8 @@ marker_fn =  []
 
 class MCStates(Enum):
     RUNNING = 1
-    RUNNABLE = 2
-    WAITING = 3
+    WAITING = 2
+
 
 class MCThread():
     _instance_lock = threading.Lock()
@@ -23,6 +22,8 @@ class MCThread():
             self.name = name 
             self.state = MCStates.RUNNING
             self.lk = None
+            self.lineno = 0
+            self.cur_lineno = 0
 
     def __init__(self, *args, **argv):
         self.__current = None
@@ -48,25 +49,30 @@ class MCThread():
 
     def set_current(self, current):
         self.__current = self.mcthreads[current]
+        return self.__current
     
-    def awake_current(self):
-        self.__current.state = MCStates.RUNNING
-        self.__current.lk = None
+    def change_current_state(self, state, lk):
+        self.__current.state = state
+        self.__current.lk = lk
+
+    def get_thread(self, name):
+        return self.mcthreads[name]
 
     def reset(self):
         for t in self.mcthreads.values():
             t.state = MCStates.RUNNING
             t.lk = None
+            t.cur_lineno = 0
 
-    def get_thread(self, name):
-        return self.mcthreads[name]
-
+    def get_true_lineno(self, no):
+        if self.__current == None:  return no 
+        if self.__current.state == MCStates.RUNNING:
+            self.__current.cur_lineno = no
+        return self.__current.cur_lineno
 
 
 MC = MCThread()
     
-
-
 
 class MCLock():
     def __init__(self, name):
@@ -75,48 +81,56 @@ class MCLock():
         self.__belong = None
     
     def __repr__(self):
-        return "Lock "+ self.__name + " "+ ("unlocked" if self.__belong == None else "=> " + self.__belong.name)
-
-    def acquire(self):
-        if self.__locked == 1:
-            MC.get_current().state = MCStates.WAITING
-            MC.get_current().lk = self
-        else:
-            self.__belong = MC.get_current()
-        self.__locked = 1
-
-    def get_state(self):
-        return self.__locked
+        return "Lock "+ self.__name + " "+ ("unlocked" if self.__belong == None \
+            else "=> " + self.__belong.name)
     
-    def set_state(self, state, thread):
-        self.__locked = state
-        self.__belong = thread
-
     def get_name(self):
         return self.__name
+
+    def acquire(self):
+        if self.__locked:
+            MC.change_current_state(MCStates.WAITING, self)
+        else:
+            self.__belong = MC.get_current()
+        self.set_state(True)
 
     def release(self):
         if not self.__locked:
             raise RuntimeError("Lock is tried to relieve while free")
-        self.__locked = 0
+        self.__locked = False
+        self.__belong = None
 
-    def __lkcopy__(self, mc):
-        self.__locked = mc.get_state()
-        self.__name = mc.get_name()
+    def get_state(self):
+        return self.__locked
+    
+    def set_state(self, state, thread=None):
+        if thread and isinstance(thread, MCThread.Thread) and isinstance(state, bool):
+            self.__locked = state
+            self.__belong = thread
+        elif not thread:
+            self.__locked = True
+        else:
+            raise ValueError("type of lock state should be bool and type of \
+                thread should be MCThread, while get {} and {}"\
+                .format(type(state), type(thread))) 
+
 
 def marker(fn):
     '''Decorate a member function as a state marker'''
     global marker_fn
     marker_fn.append(fn)
 
+
 def localvar(s, t, varname):
     '''Return local variable value of thread t in state s'''
     return s.get(t, (0, {}))[1].get(varname, None)
 
+
 def checkpoint():
     '''Instrumented `yield checkpoint()` goes here'''
     f = inspect.stack()[1].frame # stack[1] is the caller of checkpoint()
-    return (f.f_lineno, { k: v for k, v in f.f_locals.items() if k != 'self' })
+    return (MC.get_true_lineno(f.f_lineno), { k: v for k, v in f.f_locals.items() if k != 'self' })
+
 
 def hack(Class):
     '''Hack Class to instrument @mc.thread functions'''
@@ -125,6 +139,8 @@ def hack(Class):
             if isinstance(node, ast.FunctionDef):
                 if node.name in MC.threads_names():
                     # a @mc.thread function -> instrument it
+                    MC.get_thread(node.name).lineno = node.lineno
+                    print(node.lineno)
                     in_fn, node.decorator_list = True, []
                 elif node.decorator_list:
                     # a decorated function like @mc.mark -> remove it
@@ -138,6 +154,9 @@ def hack(Class):
                         ast.Call(func=ast.Name(checkpoint.__name__, ctx=ast.Load()),
                             args=[], keywords=[]))) )
                 body.append(self.generic_visit(line, in_fn))
+            if body and in_fn:
+                body.append(ast.parse("yield checkpoint()"))
+                
             node.body = body
             return node
 
@@ -147,10 +166,14 @@ def hack(Class):
         # set a breakpoint() here to see **magic happens**!
         exec(hacked_src, globals(), vars)
         Class.hacked, Class.hacked_src = vars[Class.__name__], hacked_src
+        f = open('mcprocess.py','w')
+        f.write(hacked_src)
+        f.close()
     return Class
 
+
 def execute(Class, trace):
-    '''Execute trace (like [0,0,0,2,2,1,1,1]) on Class'''
+    '''Execute trace (like [t1, t2, t2]) on Class'''
     def attrs(obj):
         for attr in dir(obj):
             val = getattr(obj, attr)
@@ -159,43 +182,36 @@ def execute(Class, trace):
 
     obj = hack(Class).hacked()
     for attr, val in attrs(obj):
-        if type(val) == MCLock:
-            tmp = MCLock("tmp")
-            tmp.__lkcopy__(val)
-            val = tmp
-            val.set_state(0, None)
-        else:
-            val = copy.deepcopy(val)
+        if isinstance(val, MCLock): val = MCLock(val.get_name())
+        else:   val = copy.deepcopy(val)
         setattr(obj, attr, val)
     MC.reset()
  
-    T = []
+    T = {}
     threads = MC.threads_names()
     for t in threads:
         fn = getattr(obj, t)
-        T.append(fn()) # a generator for a thread
-    S = { t: T[i].__next__() for i, t in enumerate(threads) }
-
+        T[t] = fn() # a generator for a thread
+    S = { t: T[t].__next__() for t in threads }
 
     while trace:
-        chosen, tname, trace = trace[0], threads[trace[0]], trace[1:]
+        tname, trace = trace[0], trace[1:]
         try:
-            if T[chosen]:
-                MC.set_current(tname)
-                current = MC.get_current()
-                if current.state == MCStates.WAITING and current.lk.get_state() == 0:
-                    current.lk.set_state(1, current)
-                    MC.awake_current()
-
+            if T[tname]:
+                current = MC.set_current(tname)
+                if current.state == MCStates.WAITING and not current.lk.get_state():
+                    current.lk.set_state(True, current)
+                    MC.change_current_state(MCStates.RUNNING, None)
                 if current.state == MCStates.RUNNING:
-                    S[tname] = T[chosen].__next__()
+                    S[tname] = T[tname].__next__()
         except StopIteration:
             S.pop(tname)
-            T[chosen] = None
+            T[tname] = None
 
     for attr, val in attrs(obj):
         S[attr] = val
     return obj, S
+
 
 class State:
     def __init__(self, Class, trace):
@@ -218,12 +234,14 @@ class State:
             return repr(obj)
         raise ValueError('Cannot freeze')
 
+
 def serialize(Class, s0, vertices, edges):
     '''Serialize all model checking results'''
     print(f'CLASS({repr(Class.hacked_src)})')
-    dot = Digraph(comment='The Test Table', format="png")
 
+    dot = Digraph(comment='The Test Table', format="png")
     sid = { s0.name: 0 }
+
     def name(s):
         if s.name not in sid: 
             sid[s.name] = len(sid)
@@ -235,10 +253,11 @@ def serialize(Class, s0, vertices, edges):
         dot.node(name(u), f'STATE({name(u)}, {repr(u.state)}, {repr(mk)})')
 
     for u, v, chosen in edges:
-        print(f'TRANS({name(u)}, {name(v)}, {repr(MC.threads_names()[chosen])})')
-        dot.edge(name(u),name(v), f'{repr(MC.threads_names()[chosen])}')
+        print(f'TRANS({name(u)}, {name(v)}, {repr(chosen)})')
+        dot.edge(name(u),name(v), f'{repr(chosen)}')
 
     dot.view()
+
 
 def check_bfs(Class):
     '''Enumerate all possible thread interleavings of @mc.thread functions'''
@@ -248,17 +267,16 @@ def check_bfs(Class):
     queue, vertices, edges = [s0], {s0.name: s0}, []
     while queue:
         u, queue = queue[0], queue[1:]
-        for chosen, _ in enumerate(MC.threads_names()):
+        for chosen in MC.threads_names():
             v = State(Class, u.trace + [chosen])
             if v.name not in vertices:
                 queue.append(v)
                 vertices[v.name] = v
             edges.append((u, v, chosen))
-
     serialize(Class, s0, vertices, edges)
 
-src, vars = Path(sys.argv[1]).read_text(), {}
 
+src, vars = Path(sys.argv[1]).read_text(), {}
 exec(src, globals(), vars)
 Class = [C for C in vars.values() if type(C) == type].pop()
 setattr(Class, 'source', src)
