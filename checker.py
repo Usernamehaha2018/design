@@ -4,6 +4,7 @@ from pathlib import Path
 from enum import Enum
 from graphviz import Digraph
 
+from MCLock import MCLock, Semaphore
 
 marker_fn =  []
 
@@ -11,7 +12,6 @@ marker_fn =  []
 class MCStates(Enum):
     RUNNING = 1
     WAITING = 2
-
 
 class MCThread():
     _instance_lock = threading.Lock()
@@ -69,50 +69,21 @@ class MCThread():
         if self.__current.state == MCStates.RUNNING:
             self.__current.cur_lineno = no
         return self.__current.cur_lineno
-
+    
+    def __try_schedule__(self):
+        if self.__current.state == MCStates.RUNNING:
+            return True
+        elif self.__current.state == MCStates.WAITING:
+            if self.__current.lk.available():
+                self.__current.lk.set_state(thread = self.__current)
+                self.change_current_state(MCStates.RUNNING, None)
+        return False
+        
+                
 
 MC = MCThread()
     
 
-class MCLock():
-    def __init__(self, name):
-        self.__locked = 0
-        self.__name = str(name)
-        self.__belong = None
-    
-    def __repr__(self):
-        return "Lock "+ self.__name + " "+ ("unlocked" if self.__belong == None \
-            else "=> " + self.__belong.name)
-    
-    def get_name(self):
-        return self.__name
-
-    def acquire(self):
-        if self.__locked:
-            MC.change_current_state(MCStates.WAITING, self)
-        else:
-            self.__belong = MC.get_current()
-        self.set_state(True)
-
-    def release(self):
-        if not self.__locked:
-            raise RuntimeError("Lock is tried to relieve while free")
-        self.__locked = False
-        self.__belong = None
-
-    def get_state(self):
-        return self.__locked
-    
-    def set_state(self, state, thread=None):
-        if thread and isinstance(thread, MCThread.Thread) and isinstance(state, bool):
-            self.__locked = state
-            self.__belong = thread
-        elif not thread:
-            self.__locked = True
-        else:
-            raise ValueError("type of lock state should be bool and type of \
-                thread should be MCThread, while get {} and {}"\
-                .format(type(state), type(thread))) 
 
 
 def marker(fn):
@@ -177,12 +148,13 @@ def execute(Class, trace):
     def attrs(obj):
         for attr in dir(obj):
             val = getattr(obj, attr)
-            if not attr.startswith('__') and type(val) in [bool, int, str, list, tuple, dict, MCLock]:
+            if not attr.startswith('__') and type(val) in [bool, int, str, list, tuple, dict, MCLock, Semaphore]:
                 yield attr, val
 
     obj = hack(Class).hacked()
     for attr, val in attrs(obj):
-        if isinstance(val, MCLock): val = MCLock(val.get_name())
+        if isinstance(val, Semaphore): val = Semaphore(val.get_name(), val.max_count, MC)
+        elif isinstance(val, MCLock): val = MCLock(val.get_name(), MC)
         else:   val = copy.deepcopy(val)
         setattr(obj, attr, val)
     MC.reset()
@@ -199,9 +171,7 @@ def execute(Class, trace):
         try:
             if T[tname]:
                 current = MC.set_current(tname)
-                if current.state == MCStates.WAITING and not current.lk.get_state():
-                    current.lk.set_state(True, current)
-                    MC.change_current_state(MCStates.RUNNING, None)
+                MC.__try_schedule__()
                 if current.state == MCStates.RUNNING:
                     S[tname] = T[tname].__next__()
         except StopIteration:
@@ -230,7 +200,7 @@ class State:
             return tuple(sorted(
                 zip(obj.keys(), (State.freeze(v) for v in obj.values()))
             ))
-        elif type(obj) in [MCLock]:
+        elif type(obj) in [MCLock, Semaphore]:
             return repr(obj)
         raise ValueError('Cannot freeze')
 

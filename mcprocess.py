@@ -1,18 +1,18 @@
 class Mutex:
-    lock1 = MCLock('lk1')
-    lock2 = MCLock('lk2')
+    lock1 = Semaphore('lk1', 1)
+    lock2 = Semaphore('lk2', 1)
 
     def t1(self):
         yield checkpoint()
         while True:
             yield checkpoint()
-            self.lock1.acquire()
+            self.lock1.P()
             yield checkpoint()
-            self.lock2.acquire()
+            self.lock2.P()
             yield checkpoint()
-            self.lock2.release()
+            self.lock2.V()
             yield checkpoint()
-            self.lock1.release()
+            self.lock1.V()
             yield checkpoint()
         yield checkpoint()
 
@@ -20,12 +20,12 @@ class Mutex:
         yield checkpoint()
         while True:
             yield checkpoint()
-            self.lock2.acquire()
+            self.lock2.P()
             yield checkpoint()
-            self.lock1.acquire()
+            self.lock1.P()
             yield checkpoint()
-            self.lock1.release()
+            self.lock1.V()
             yield checkpoint()
-            self.lock2.release()
+            self.lock2.V()
             yield checkpoint()
         yield checkpoint()
