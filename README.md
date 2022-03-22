@@ -19,15 +19,16 @@ before you run this program.
 ### Executing examples:
 
 ```shell
-python3 mc.py ./mutex-bad.py
+python3 test.py
 ```
 
 
 
 ### Output:
 
-The output includes 2 sections for each test:
+The output includes 3 sections for each test:
 
+* intermediate mcprocess.py
 * vertices and edges which describe the graph by text
 * the graph itself 
 

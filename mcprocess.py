@@ -1,3 +1,8 @@
+import checker
+from MCLock import Semaphore
+from MCThread import MCThread
+
+
 class Mutex:
     lock1 = Semaphore('lk1', 1)
     lock2 = Semaphore('lk2', 1)
@@ -29,3 +34,6 @@ class Mutex:
             self.lock2.V()
             yield checkpoint()
         yield checkpoint()
+
+
+checker.check()
